@@ -3,7 +3,9 @@ name: Daily Q-Commerce Scrape
 on:
   schedule:
     # Runs at 12:30 AM UTC = 6:00 AM IST every day
-    - cron: '30 0 * * *'
+    - cron: '30 6 * * *'   # 7:00 AM IST
+    - cron: '30 14 * * *'   # 1:00 PM IST
+    - cron: '30 20 * * *'  # 7:00 PM IST
   workflow_dispatch:
     # Also allows manual trigger from GitHub UI (Actions tab â†’ Run workflow)
 
@@ -31,9 +33,9 @@ jobs:
         run: python scraper.py
 
       - name: Commit updated dashboard
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Auto-update: Q-Commerce availability $(date +'%Y-%m-%d')"
-          file_pattern: index.html last_run.txt
-          commit_user_name: "qcomm-bot"
-          commit_user_email: "bot@qcomm"
+        run: |
+          git config user.name "qcomm-bot"
+          git config user.email "bot@qcomm"
+          git add index.html last_run.txt
+          git diff --cached --quiet || git commit -m "Auto-update: Q-Commerce availability $(date +'%Y-%m-%d')"
+          git push
