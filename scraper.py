@@ -1,11 +1,12 @@
 """
-Q-Commerce Cigarette SKU Availability Scraper
-Runs headlessly on GitHub Actions. Outputs index.html + last_run.txt
+Q-Commerce Cigarette SKU Availability Checker  v3.0
+- Age gate handler added
+- Multiple search aliases per SKU
+- Looser fuzzy matching
 """
-import asyncio, re, json, datetime, pandas as pd
+import asyncio, re, json, datetime
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# ── PINCODES ───────────────────────────────────────────────────
 PINCODES = [
     ("700156","New Town AA II-III","Premium"),
     ("700019","Ballygunge","Premium"),
@@ -38,58 +39,172 @@ PINCODES = [
     ("700029","Lake Gardens","Upper Mid"),
 ]
 
-# ── SKUS ───────────────────────────────────────────────────────
+# Each SKU has multiple search aliases — tries each until a match is found
+# (market_sku, brand, display_name, segment, [search_aliases])
 SKUS = [
-    ("American Club","AMCLUBCLOVEMINT10","American Club Clove Mint 10","KSFT"),
-    ("American Club","AMCNYCOOLSLKFTK20","American Club NY Cool 20","Super KSFT"),
-    ("Benson & Hedges","B&HFTKGB20","Benson & Hedges Blue Gold 20","KSFT"),
-    ("Benson & Hedges","B&HFTKSPL20","Benson & Hedges Special 20","KSFT"),
-    ("Classic","CLALPHATECFK20","Classic Alphatec 20","KSFT"),
-    ("Classic","CLFLKBT10","Classic Balanced Taste (Milds) 10","KSFT"),
-    ("Classic","CLFTKBT20","Classic Balanced Taste (Milds) 20","KSFT"),
-    ("Classic","CLCLOVEFTK12","Classic Clove 12","Super KSFT"),
-    ("Classic","CLASSICCONNECTFK20","Classic Connect 20","KSFT"),
-    ("Classic","CLDOUBLEBURST10","Classic Double Burst 10","KSFT"),
-    ("Classic","CLDOUBLEBURST20","Classic Double Burst 20","KSFT"),
-    ("Classic","CLFINTASTLOWSMEL20","Classic Fine Taste Low Smell 20","KSFT"),
-    ("Classic","CLASSICICEBURST10","Classic Ice Burst 10","KSFT"),
-    ("Classic","CLASSICICEBURST20","Classic Ice Burst 20","KSFT"),
-    ("Classic","CLFTKREFT10","Classic Refined Taste (Ultra mild) 10","KSFT"),
-    ("Classic","CLFTLREFT20","Classic Refined Taste (Ultra mild) 20","KSFT"),
-    ("Classic","CLFTKRT10","Classic Rich Taste 10 (Regular)","KSFT"),
-    ("Classic","CLFTKRT20","Classic Rich Taste 20 (Regular)","KSFT"),
-    ("Classic","CLFTKVR16CP","Classic Verve 16","KSFT"),
-    ("Classic","CLFTKVRBT16CP","Classic Verve Balance Taste 16","KSFT"),
-    ("Flake","FLSPLDSFT10","Flake Special 10","DSFT"),
-    ("Gold Flake","GFFTKBLUE10","Gold Flake Blue 10","KSFT"),
-    ("Gold Flake","GFFTKBLUE20","Gold Flake Blue 20","KSFT"),
-    ("Gold Flake","GFINDIEMINTFT10","Gold Flake Indie Mint 10","RSFT"),
-    ("Gold Flake","GFKMIXPOD10","Gold Flake Mixpod 10","KSFT"),
-    ("Gold Flake","GFKMIXPOD20","Gold Flake Mixpod 20","KSFT"),
-    ("Gold Flake","GFPRFT10","Gold Flake Premium Filter 10","RSFT"),
-    ("Gold Flake","GFFTK10","Gold Flake Red 10","KSFT"),
-    ("Gold Flake","GFFTK20","Gold Flake Red 20","KSFT"),
-    ("Gold Flake","GFSLFTK16CP","Gold Flake SLK 16","KSFT"),
-    ("Gold Flake","GFSPSTRDSFT10-VAR2","Gold Flake Super Star V2 10","DSFT"),
-    ("Gold Flake","GFTKTWINPOD10","Gold Flake Twinpod 10","KSFT"),
-    ("Gold Flake","GFTKTWINPOD20","Gold Flake Twinpod 20","KSFT"),
-    ("India Kings","IKFTKWHITEGOLD20","India Kings White Gold 20","KSFT"),
-    ("Navy Cut","NC10","Navy Cut 10","Longs"),
-    ("SilkCut","SCBLUEDSFT10","Silkcut Blue 10","DSFT"),
-    ("SilkCut","SCDSFT10","Silkcut Special 10","DSFT"),
+    ("AMCLUBCLOVEMINT10",  "American Club",  "American Club Clove Mint 10",          "KSFT",
+     ["American Club Clove", "American Club Mint", "American Club 10"]),
+
+    ("AMCNYCOOLSLKFTK20",  "American Club",  "American Club NY Cool 20",             "Super KSFT",
+     ["American Club NY Cool", "American Club 20", "American Club"]),
+
+    ("B&HFTKGB20",         "Benson & Hedges","Benson & Hedges Blue Gold 20",         "KSFT",
+     ["Benson Hedges Blue", "B&H Blue Gold", "Benson Hedges 20", "Benson Hedges"]),
+
+    ("B&HFTKSPL20",        "Benson & Hedges","Benson & Hedges Special 20",           "KSFT",
+     ["Benson Hedges Special", "B&H Special", "Benson Hedges 20"]),
+
+    ("CLALPHATECFK20",     "Classic",        "Classic Alphatec 20",                  "KSFT",
+     ["Classic Alphatec", "Classic Alpha Tec", "ITC Classic Alphatec"]),
+
+    ("CLFLKBT10",          "Classic",        "Classic Balanced Taste 10",            "KSFT",
+     ["Classic Balanced Taste", "Classic Milds 10", "Classic Milds", "ITC Classic 10"]),
+
+    ("CLFTKBT20",          "Classic",        "Classic Balanced Taste 20",            "KSFT",
+     ["Classic Balanced Taste 20", "Classic Milds 20", "ITC Classic 20"]),
+
+    ("CLCLOVEFTK12",       "Classic",        "Classic Clove 12",                     "Super KSFT",
+     ["Classic Clove", "ITC Classic Clove", "Classic Clove 12"]),
+
+    ("CLASSICCONNECTFK20", "Classic",        "Classic Connect 20",                   "KSFT",
+     ["Classic Connect", "ITC Classic Connect"]),
+
+    ("CLDOUBLEBURST10",    "Classic",        "Classic Double Burst 10",              "KSFT",
+     ["Classic Double Burst", "ITC Classic Double Burst"]),
+
+    ("CLDOUBLEBURST20",    "Classic",        "Classic Double Burst 20",              "KSFT",
+     ["Classic Double Burst 20"]),
+
+    ("CLFINTASTLOWSMEL20", "Classic",        "Classic Fine Taste 20",                "KSFT",
+     ["Classic Fine Taste", "Classic Fine", "ITC Classic Fine"]),
+
+    ("CLASSICICEBURST10",  "Classic",        "Classic Ice Burst 10",                 "KSFT",
+     ["Classic Ice Burst", "Classic Ice 10", "ITC Classic Ice"]),
+
+    ("CLASSICICEBURST20",  "Classic",        "Classic Ice Burst 20",                 "KSFT",
+     ["Classic Ice Burst 20", "Classic Ice 20"]),
+
+    ("CLFTKREFT10",        "Classic",        "Classic Refined Taste 10",             "KSFT",
+     ["Classic Refined Taste", "Classic Ultra Mild", "Classic Refined 10", "ITC Classic Refined"]),
+
+    ("CLFTLREFT20",        "Classic",        "Classic Refined Taste 20",             "KSFT",
+     ["Classic Refined Taste 20", "Classic Ultra Mild 20"]),
+
+    ("CLFTKRT10",          "Classic",        "Classic Rich Taste 10",                "KSFT",
+     ["Classic Rich Taste", "Classic Regular 10", "Classic Rich 10", "ITC Classic Regular"]),
+
+    ("CLFTKRT20",          "Classic",        "Classic Rich Taste 20",                "KSFT",
+     ["Classic Rich Taste 20", "Classic Regular 20", "ITC Classic 20"]),
+
+    ("CLFTKVR16CP",        "Classic",        "Classic Verve 16",                     "KSFT",
+     ["Classic Verve", "ITC Classic Verve"]),
+
+    ("CLFTKVRBT16CP",      "Classic",        "Classic Verve Balance Taste 16",       "KSFT",
+     ["Classic Verve Balance", "Classic Verve Balanced"]),
+
+    ("FLSPLDSFT10",        "Flake",          "Flake Special 10",                     "DSFT",
+     ["Flake Special", "ITC Flake", "Flake Cigarette"]),
+
+    ("GFFTKBLUE10",        "Gold Flake",     "Gold Flake Blue 10",                   "KSFT",
+     ["Gold Flake Blue 10", "Gold Flake Kings Blue 10", "GF Blue 10"]),
+
+    ("GFFTKBLUE20",        "Gold Flake",     "Gold Flake Blue 20",                   "KSFT",
+     ["Gold Flake Blue 20", "Gold Flake Kings Blue 20"]),
+
+    ("GFINDIEMINTFT10",    "Gold Flake",     "Gold Flake Indie Mint 10",             "RSFT",
+     ["Gold Flake Indie Mint", "Gold Flake Indie", "GF Indie Mint"]),
+
+    ("GFKMIXPOD10",        "Gold Flake",     "Gold Flake Mixpod 10",                 "KSFT",
+     ["Gold Flake Mixpod", "GF Mixpod 10", "Gold Flake Mix Pod"]),
+
+    ("GFKMIXPOD20",        "Gold Flake",     "Gold Flake Mixpod 20",                 "KSFT",
+     ["Gold Flake Mixpod 20", "GF Mixpod 20"]),
+
+    ("GFPRFT10",           "Gold Flake",     "Gold Flake Premium Filter 10",         "RSFT",
+     ["Gold Flake Premium Filter", "Gold Flake Premium 10", "GF Premium Filter"]),
+
+    ("GFFTK10",            "Gold Flake",     "Gold Flake Kings 10",                  "KSFT",
+     ["Gold Flake Kings 10", "Gold Flake 10", "GF Kings 10"]),
+
+    ("GFFTK20",            "Gold Flake",     "Gold Flake Kings 20",                  "KSFT",
+     ["Gold Flake Kings 20", "Gold Flake 20", "GF Kings 20"]),
+
+    ("GFSLFTK16CP",        "Gold Flake",     "Gold Flake SLK 16",                    "KSFT",
+     ["Gold Flake SLK", "Gold Flake Silk", "GF SLK 16"]),
+
+    ("GFSPSTRDSFT10-VAR2", "Gold Flake",     "Gold Flake Super Star 10",             "DSFT",
+     ["Gold Flake Super Star", "GF Super Star", "Gold Flake Superstar"]),
+
+    ("GFTKTWINPOD10",      "Gold Flake",     "Gold Flake Twinpod 10",                "KSFT",
+     ["Gold Flake Twinpod", "GF Twinpod 10", "Gold Flake Twin Pod"]),
+
+    ("GFTKTWINPOD20",      "Gold Flake",     "Gold Flake Twinpod 20",                "KSFT",
+     ["Gold Flake Twinpod 20", "GF Twinpod 20"]),
+
+    ("IKFTKWHITEGOLD20",   "India Kings",    "India Kings White Gold 20",            "KSFT",
+     ["India Kings White Gold", "India Kings 20", "ITC India Kings"]),
+
+    ("NC10",               "Navy Cut",       "Navy Cut 10",                          "Longs",
+     ["Navy Cut 10", "ITC Navy Cut", "Navy Cut Filter 10", "Navy Cut Cigarette"]),
+
+    ("SCBLUEDSFT10",       "SilkCut",        "Silkcut Blue 10",                      "DSFT",
+     ["Silk Cut Blue", "Silkcut Blue", "ITC Silk Cut Blue"]),
+
+    ("SCDSFT10",           "SilkCut",        "Silkcut Special 10",                   "DSFT",
+     ["Silk Cut Special", "Silkcut Special", "ITC Silk Cut", "Silk Cut 10"]),
 ]
 
-UNIQUE_BRANDS = sorted(set(s[0] for s in SKUS))
+UNIQUE_BRANDS = sorted(set(s[1] for s in SKUS))
 PLATFORMS = ["Blinkit", "Zepto", "Swiggy Instamart"]
 
-# ── HELPERS ────────────────────────────────────────────────────
-def sku_found_in_text(sku_name, page_text):
+
+# ── AGE GATE HANDLER ──────────────────────────────────────────
+async def handle_age_gate(page):
+    """Click through any age verification popup."""
+    age_gate_selectors = [
+        "text=I am 18",
+        "text=Yes, I am 18",
+        "text=I'm 18",
+        "text=Yes, I'm above 18",
+        "text=Confirm Age",
+        "text=I am above 18",
+        "text=Yes, I am above 18",
+        "text=Proceed",
+        "text=Continue",
+        "button[class*='age']",
+        "[data-testid*='age']",
+        "[class*='age-gate']",
+        "[class*='ageGate']",
+    ]
+    for sel in age_gate_selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=1500):
+                await btn.click(timeout=2000)
+                await page.wait_for_timeout(1000)
+                print("    ✅ Age gate cleared")
+                return True
+        except Exception:
+            pass
+    return False
+
+
+# ── FUZZY MATCH ───────────────────────────────────────────────
+def loose_match(alias, page_text):
+    """Match if majority of meaningful words from alias appear in page text."""
     page_lower = page_text.lower()
-    core = re.sub(r'\b(10|20|12|16)\b', '', sku_name.lower()).strip()
+    alias_lower = alias.lower()
+    # Remove pack sizes
+    core = re.sub(r'\b(\d+s?|pack|of)\b', '', alias_lower).strip()
     words = [w for w in core.split() if len(w) > 2]
-    return all(w in page_lower for w in words)
+    if not words:
+        return False
+    matches = sum(1 for w in words if w in page_lower)
+    # Need at least 60% of words to match
+    return matches >= max(1, len(words) * 0.6)
 
 
+# ── LOCATION SETTER ───────────────────────────────────────────
 async def set_location(page, pincode, platform):
     urls = {
         "Blinkit":          "https://blinkit.com",
@@ -99,6 +214,10 @@ async def set_location(page, pincode, platform):
     try:
         await page.goto(urls[platform], timeout=35000)
         await page.wait_for_timeout(3000)
+
+        # Handle age gate immediately on page load
+        await handle_age_gate(page)
+
         for sel in ["[data-testid='location-bar']", "text=Detect Location",
                     "[class*='location']", "text=Enter Location", "text=Enter manually"]:
             try:
@@ -107,6 +226,7 @@ async def set_location(page, pincode, platform):
                 break
             except Exception:
                 pass
+
         for sel in ["input[placeholder*='pincode']","input[placeholder*='Pincode']",
                     "input[placeholder*='Enter']","input[placeholder*='area']",
                     "input[placeholder*='Search']","input[type='text']"]:
@@ -130,46 +250,69 @@ async def set_location(page, pincode, platform):
         return False
 
 
-async def search_brand(page, brand, platform):
-    findings = {s[1]: (False, None) for s in SKUS if s[0] == brand}
-    try:
-        search_inp = page.locator(
-            "input[placeholder*='Search'], input[type='search']"
-        ).first
-        await search_inp.click(timeout=5000)
-        await search_inp.fill("", timeout=2000)
-        await search_inp.type(brand, delay=80)
-        await page.wait_for_timeout(3000)
-        page_text = await page.inner_text("body")
-        card_sels = {
-            "Blinkit":          ".product-card, [data-testid='product-item']",
-            "Zepto":            "[class*='ProductCard'], [class*='product-card']",
-            "Swiggy Instamart": "[class*='ItemCard'], [class*='item-card']",
-        }
-        for (br, msku, name, seg) in SKUS:
-            if br != brand:
+# ── SEARCH WITH ALIASES ───────────────────────────────────────
+async def search_sku(page, sku, platform):
+    """
+    Try each alias until a match is found.
+    Returns (found: bool, price: str|None)
+    """
+    msku, brand, name, seg, aliases = sku
+
+    card_sels = {
+        "Blinkit":          ".product-card, [data-testid='product-item'], [class*='ProductCard']",
+        "Zepto":            "[class*='ProductCard'], [class*='product-card']",
+        "Swiggy Instamart": "[class*='ItemCard'], [class*='item-card']",
+    }
+
+    for alias in aliases:
+        try:
+            # Handle any age gate that appeared
+            await handle_age_gate(page)
+
+            search_inp = page.locator(
+                "input[placeholder*='Search'], input[type='search']"
+            ).first
+            await search_inp.click(timeout=4000)
+            await search_inp.fill("", timeout=2000)
+            await search_inp.type(alias, delay=70)
+            await page.wait_for_timeout(2500)
+
+            # Handle age gate after search
+            await handle_age_gate(page)
+
+            page_text = await page.inner_text("body")
+
+            # Check if any results visible
+            if "no result" in page_text.lower() or "not found" in page_text.lower():
                 continue
-            found = sku_found_in_text(name, page_text)
+
+            if not loose_match(alias, page_text):
+                continue
+
+            # Try to get price from matching card
             price = None
-            if found:
-                try:
-                    cards = page.locator(card_sels.get(platform, "[class*='card']"))
-                    for i in range(min(await cards.count(), 25)):
-                        ct = await cards.nth(i).inner_text(timeout=800)
-                        if sku_found_in_text(name, ct):
-                            m = re.search(r'₹\s*(\d+)', ct)
-                            if m:
-                                price = f"₹{m.group(1)}"
-                            break
-                except Exception:
-                    pass
-            findings[msku] = (found, price)
-    except Exception:
-        pass
-    return findings
+            try:
+                cards = page.locator(card_sels.get(platform, "[class*='card']"))
+                count = await cards.count()
+                for i in range(min(count, 20)):
+                    ct = await cards.nth(i).inner_text(timeout=800)
+                    if loose_match(alias, ct):
+                        m = re.search(r'₹\s*(\d+)', ct)
+                        if m:
+                            price = f"₹{m.group(1)}"
+                        break
+            except Exception:
+                pass
+
+            return True, price
+
+        except Exception:
+            continue
+
+    return False, None
 
 
-# ── HTML GENERATOR ─────────────────────────────────────────────
+# ── HTML BUILDER ──────────────────────────────────────────────
 def build_html(rows, run_dt):
     data_str = json.dumps(rows)
     return f"""<!DOCTYPE html>
@@ -238,7 +381,7 @@ def build_html(rows, run_dt):
     <div class="logo-mark">Q</div>
     <div><h1>Q-Commerce Availability Tracker</h1><div class="subtitle">ECAL Branch · Premium + Upper Mid Zones</div></div>
   </div>
-  <div class="run-time">Last updated<br><span>{run_dt}</span></div>
+  <div class="run-time">Updated<br><span>{run_dt}</span></div>
 </header>
 <div class="stats">
   <div class="stat"><div class="stat-val" id="s-total">—</div><div class="stat-lbl">Total Checks</div></div>
@@ -353,11 +496,12 @@ render();
 </body></html>"""
 
 
-# ── MAIN ───────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────
 async def run():
     all_rows = []
-    run_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5,minutes=30)))\
-             .strftime("%d %b %Y, %I:%M %p IST")
+    run_dt = datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    ).strftime("%d %b %Y, %I:%M %p IST")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -370,11 +514,11 @@ async def run():
         done = 0
 
         for (pincode, area, tier) in PINCODES:
-            print(f"\n📍 {pincode}  {area}  [{tier}]")
+            print(f"\n📍 {pincode} {area} [{tier}]")
 
             for platform in PLATFORMS:
                 done += 1
-                print(f"  🏪 {platform}  ({done}/{total})")
+                print(f"  🏪 {platform} ({done}/{total})")
 
                 page = await browser.new_page()
                 await page.add_init_script(
@@ -388,37 +532,32 @@ async def run():
                     for s in SKUS:
                         all_rows.append({
                             "platform":platform,"pincode":pincode,"area":area,"tier":tier,
-                            "brand":s[0],"market_sku":s[1],"sku_name":s[2],"segment":s[3],
+                            "brand":s[1],"market_sku":s[0],"sku_name":s[2],"segment":s[3],
                             "available":0,"price":None,"notes":"location_failed",
                         })
                     await page.close()
                     continue
 
-                for brand in UNIQUE_BRANDS:
-                    findings = await search_brand(page, brand, platform)
-                    for (br, msku, name, seg) in SKUS:
-                        if br != brand:
-                            continue
-                        found, price = findings.get(msku, (False, None))
-                        print(f"    {'✅' if found else '❌'} {name}")
-                        all_rows.append({
-                            "platform":platform,"pincode":pincode,"area":area,"tier":tier,
-                            "brand":br,"market_sku":msku,"sku_name":name,"segment":seg,
-                            "available":100 if found else 0,"price":price,"notes":"",
-                        })
-                    await asyncio.sleep(0.8)
+                for sku in SKUS:
+                    found, price = await search_sku(page, sku, platform)
+                    icon = f"✅ {price}" if found else "❌"
+                    print(f"    {icon:<12} {sku[2][:45]}")
+                    all_rows.append({
+                        "platform":platform,"pincode":pincode,"area":area,"tier":tier,
+                        "brand":sku[1],"market_sku":sku[0],"sku_name":sku[2],"segment":sku[3],
+                        "available":100 if found else 0,"price":price,"notes":"",
+                        "checked_at":run_dt,
+                    })
+                    await asyncio.sleep(0.6)
 
                 await page.close()
 
         await browser.close()
 
-    # Save HTML
     html = build_html(all_rows, run_dt)
-    with open("index.html", "w", encoding="utf-8") as f:
+    with open("index.html","w",encoding="utf-8") as f:
         f.write(html)
-
-    # Save last run timestamp
-    with open("last_run.txt", "w") as f:
+    with open("last_run.txt","w") as f:
         f.write(run_dt)
 
     print(f"\n✅ Done — {len(all_rows)} rows. index.html updated.")
