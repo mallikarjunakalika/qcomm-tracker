@@ -14,4 +14,6 @@ Auto-updates daily at **6:00 AM IST** via GitHub Actions.
 Actions tab → **Daily Q-Commerce Scrape** → **Run workflow**
 
 ## Schedule
-Cron: `30 0 * * *` = 12:30 AM UTC = **6:00 AM IST**
+- cron: '30 1 * * *'   # 7:00 AM IST
+    - cron: '30 7 * * *'   # 1:00 PM IST
+    - cron: '30 13 * * *'  # 7:00 PM IST
